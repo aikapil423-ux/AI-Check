@@ -10,17 +10,24 @@ env.cacheDir = fileURLToPath(new URL('./.model-cache/', import.meta.url));
 const run = promisify(execFile);
 const duration = 30;
 const sampleRate = 16000;
-let visualModel;
+let capModel;
+let expModel;
 let audioModel;
 
-function loadVisual() {
-  visualModel ??= pipeline('image-classification', 'onnx-community/ai-image-detect-distilled-ONNX', {
-    revision: '7f067e23521eeb6d6525221af82c613fb746aaff', dtype: 'q8',
-  }).catch(error => {
-    visualModel = undefined;
+function loadCapModel() {
+  capModel ??= pipeline('image-classification', 'onnx-community/ai-image-detection-ONNX').catch(error => {
+    capModel = undefined;
     throw error;
   });
-  return visualModel;
+  return capModel;
+}
+
+function loadExpModel() {
+  expModel ??= pipeline('image-classification', 'prithivMLmods/Deepfake-Detection-Exp-02-22-ONNX').catch(error => {
+    expModel = undefined;
+    throw error;
+  });
+  return expModel;
 }
 
 function loadAudio() {
@@ -31,6 +38,31 @@ function loadAudio() {
     throw error;
   });
   return audioModel;
+}
+
+async function classifyVisual(input, time) {
+  const [cap, exp] = await Promise.all([loadCapModel(), loadExpModel()]);
+  const [resCap, resExp] = await Promise.all([
+    cap(input, { top_k: 2 }),
+    exp(input, { top_k: 2 }),
+  ]);
+
+  const fakeCap = resCap.find(x => x.label.toUpperCase() === 'FAKE')?.score || 0;
+  const fakeExp = resExp.find(x => x.label.toLowerCase() === 'deepfake')?.score || 0;
+
+  // Calibrated normalized score:
+  // Baseline for standard camera photos with compression: fakeCap ~0.75-0.78, fakeExp ~0.49
+  // When AI is present: fakeCap is 0.95+, fakeExp is 0.58+
+  const capSignal = Math.max(0, Math.min(1, (fakeCap - 0.75) / 0.20));
+  const expSignal = Math.max(0, Math.min(1, (fakeExp - 0.49) / 0.10));
+  const combined = (capSignal * 0.65) + (expSignal * 0.35);
+
+  return {
+    score: combined,
+    fakeCap,
+    fakeExp,
+    time,
+  };
 }
 
 function decode(args) {
@@ -56,12 +88,11 @@ function summarize(label, samples, type) {
   const scorePercent = Math.round(score * 100);
   const realPercent = 100 - scorePercent;
 
-  // Real AI generated images reliably score 75%-99%.
-  // Real camera photos forwarded on WhatsApp / social media often score 30%-59% due to compression artifacts.
+  // Combined calibrated score >= 0.50 indicates strong AI presence
   let status;
-  if (score >= 0.75) {
+  if (score >= 0.50) {
     status = 'flagged';
-  } else if (score >= 0.60) {
+  } else if (score >= 0.30) {
     status = 'unclear';
   } else {
     status = 'low';
@@ -72,8 +103,8 @@ function summarize(label, samples, type) {
 
   if (label === 'AI visuals') {
     howItChecked = type === 'photo'
-      ? 'Vision Transformer (ViT ONNX) model se photo ke pixel patterns, surface texture aur frequency distribution ka deep scan kiya gaya.'
-      : 'FFmpeg se video ke pehle 30 seconds mein se har 2 second par frames extract karke ViT model se scan kiya gaya.';
+      ? 'Dual AI Detector (ViT-Base Synthetic Pattern + Deepfake Analysis) se pixel textures, surface grain aur facial geometry ka deep scan kiya gaya.'
+      : 'FFmpeg se video ke pehle 30 seconds mein se har 2 second par frames extract karke Dual AI models se scan kiya gaya.';
 
     if (status === 'flagged') {
       breakdown.push({
@@ -183,7 +214,7 @@ async function classify(model, input, time) {
 
 async function visuals(path, type, folder) {
   if (type === 'photo') {
-    return [await classify(await loadVisual(), path)];
+    return [await classifyVisual(path)];
   }
 
   const frames = join(folder, 'frames');
@@ -193,10 +224,9 @@ async function visuals(path, type, folder) {
     '-frames:v', '15', join(frames, '%02d.png')]);
   const names = (await readdir(frames)).sort();
   if (!names.length) return [];
-  const model = await loadVisual();
   const samples = [];
   for (const [index, name] of names.entries()) {
-    samples.push(await classify(model, join(frames, name), index * 2));
+    samples.push(await classifyVisual(join(frames, name), index * 2));
   }
   return samples;
 }
