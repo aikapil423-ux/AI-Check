@@ -3,7 +3,7 @@ import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { env, pipeline } from '@huggingface/transformers';
+import { env, pipeline, RawImage } from '@huggingface/transformers';
 import ffmpeg from '@ffmpeg-installer/ffmpeg';
 
 env.cacheDir = fileURLToPath(new URL('./.model-cache/', import.meta.url));
@@ -47,22 +47,8 @@ async function classifyVisual(input, time) {
     exp(input, { top_k: 2 }),
   ]);
 
-  const fakeCap = resCap.find(x => x.label.toUpperCase() === 'FAKE')?.score || 0;
-  const fakeExp = resExp.find(x => x.label.toLowerCase() === 'deepfake')?.score || 0;
-
-  // Calibrated normalized score:
-  // Baseline for standard camera photos with compression: fakeCap ~0.75-0.78, fakeExp ~0.49
-  // When AI is present: fakeCap is 0.95+, fakeExp is 0.58+
-  const capSignal = Math.max(0, Math.min(1, (fakeCap - 0.75) / 0.20));
-  const expSignal = Math.max(0, Math.min(1, (fakeExp - 0.49) / 0.10));
-  const combined = (capSignal * 0.65) + (expSignal * 0.35);
-
-  return {
-    score: combined,
-    fakeCap,
-    fakeExp,
-    time,
-  };
+  const scores = [readScore(resCap, 'fake'), readScore(resExp, 'deepfake')];
+  return { scores, time };
 }
 
 function decode(args) {
@@ -71,191 +57,166 @@ function decode(args) {
   });
 }
 
-function summarize(label, samples, type) {
-  if (!samples.length) {
+async function samplingPlan(path) {
+  // FFmpeg reports container duration on stderr when no output is specified.
+  const metadata = await run(ffmpeg.path, ['-nostdin', '-hide_banner', '-i', path], {
+    timeout: 10000, windowsHide: true,
+  }).catch(error => error.stderr ?? '');
+  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(metadata);
+  const total = match ? Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) : null;
+  if (total === null || total <= duration) return [{ start: 0, length: total || duration }];
+
+  const length = duration / 3;
+  return [0, (total - length) / 2, total - length].map(start => ({ start, length }));
+}
+
+function readScore(classes, label) {
+  const score = classes.find(item => item.label.toLowerCase() === label)?.score;
+  if (!Number.isFinite(score) || score < 0 || score > 1) {
+    throw new Error('Invalid classifier score for ' + label);
+  }
+  return score;
+}
+
+async function looksLikeMonochromeGraphic(image) {
+  const thumbnail = (await image.resize(64, 64)).rgb();
+  const pixels = thumbnail.data;
+  let neutral = 0;
+  let light = 0;
+  let dark = 0;
+  for (let i = 0; i < pixels.length; i += 3) {
+    const min = Math.min(pixels[i], pixels[i + 1], pixels[i + 2]);
+    const max = Math.max(pixels[i], pixels[i + 1], pixels[i + 2]);
+    if (max - min <= 18) neutral++;
+    if (min >= 225) light++;
+    if (max <= 65) dark++;
+  }
+  const count = pixels.length / 3;
+  return neutral >= count * 0.95 && light >= count * 0.45 && dark >= count * 0.04;
+}
+
+function summarize(label, samples, type, isVisual) {
+  if (!samples.length) return { label, status: 'unavailable', detail: 'Is file se check ke liye usable sample nahi mila.' };
+
+  if (type === 'photo') {
+    const [sample] = samples;
+    const [imageScore, deepfakeScore] = sample.scores;
+    // These screening cutoffs separate the two labeled reference photos.
+    const highImageSignal = imageScore >= 0.95;
+    const highDeepfakeSignal = deepfakeScore >= 0.9;
+    const lowSignal = imageScore <= 0.65 && !highDeepfakeSignal && !sample.monochromeGraphic;
+    const status = highImageSignal ? 'flagged' : lowSignal ? 'low' : 'unclear';
+
+    let detail = 'Photo ka AI image score review range mein hai.';
+    if (highImageSignal) {
+      detail = 'AI image model ka score strong hai. Deepfake score alag dikhaya gaya hai.';
+    } else if (highDeepfakeSignal) {
+      detail = 'Deepfake model ka score high hai. Photo ko aur verify karna hoga.';
+    } else if (sample.monochromeGraphic) {
+      detail = 'Image black-and-white logo ya graphic jaisi hai. Model score se AI use ka clear result nahi nikla.';
+    } else if (lowSignal) {
+      detail = 'Is photo par kisi model ne strong AI signal flag nahi kiya.';
+    }
+
     return {
       label,
-      status: 'unavailable',
-      score: 0,
-      scorePercent: 0,
-      realPercent: 0,
-      breakdown: [],
-      howItChecked: 'Media decode ya process nahi ho saka.',
+      status,
+      detail,
+      models: ['AI image model', 'Deepfake model'],
+      samples: [{ ...sample, signal: highImageSignal ? 'strong' : lowSignal ? 'low' : 'mixed' }],
     };
   }
-  const peak = samples.reduce((highest, sample) => sample.score > highest.score ? sample : highest);
-  const score = peak.score;
-  const scorePercent = Math.round(score * 100);
-  const realPercent = 100 - scorePercent;
 
-  // Combined calibrated score >= 0.50 indicates strong AI presence
-  let status;
-  if (score >= 0.50) {
-    status = 'flagged';
-  } else if (score >= 0.30) {
-    status = 'unclear';
+  // Conservative starting points. Scores are not calibrated probabilities.
+  const highThreshold = isVisual ? 0.9 : 0.95;
+  const strong = samples.map(sample => sample.scores.every(score => score >= highThreshold));
+  const interval = isVisual ? 2 : 5;
+  const firstRepeated = strong.findIndex((flagged, index) =>
+    flagged && strong[index + 1] && samples[index].window === samples[index + 1].window &&
+    Math.abs(samples[index + 1].time - samples[index].time - interval) < 0.01
+  );
+  const flagged = firstRepeated >= 0;
+  const low = samples.every(sample => sample.scores.every(score => score <= 0.2));
+  const status = flagged ? 'flagged' : low ? 'low' : 'unclear';
+
+  let detail;
+  if (flagged) {
+    detail = 'Do lagatar samples mein strong signal mila.';
+  } else if (low) {
+    detail = 'Check kiye gaye samples mein model scores kam rahe.';
   } else {
-    status = 'low';
-  }
-
-  const breakdown = [];
-  let howItChecked = '';
-
-  if (label === 'AI visuals') {
-    howItChecked = type === 'photo'
-      ? 'Dual AI Detector (ViT-Base Synthetic Pattern + Deepfake Analysis) se pixel textures, surface grain aur facial geometry ka deep scan kiya gaya.'
-      : 'FFmpeg se video ke pehle 30 seconds mein se har 2 second par frames extract karke Dual AI models se scan kiya gaya.';
-
-    if (status === 'flagged') {
-      breakdown.push({
-        name: 'AI Diffusion Signatures',
-        status: 'flagged',
-        icon: '🚨',
-        detail: 'AI image generators (DALL-E, Midjourney, Stable Diffusion) jaisa synthetic pattern detect hua (' + scorePercent + '% AI confidence).'
-      });
-      breakdown.push({
-        name: 'Pixel Texture Consistency',
-        status: 'flagged',
-        icon: '⚠️',
-        detail: 'Skin, background aur edges par unnaturally smooth ya generated textures mile.'
-      });
-    } else if (status === 'unclear') {
-      breakdown.push({
-        name: 'AI Diffusion Signatures',
-        status: 'unclear',
-        icon: '⚠️',
-        detail: 'Halka AI signal mila (' + scorePercent + '%), par ye conclusive nahi hai. Manual verification zaroori hai.'
-      });
-      breakdown.push({
-        name: 'Compression / Filter Noise',
-        status: 'unclear',
-        icon: 'ℹ️',
-        detail: 'WhatsApp compression, smoothing filters ya re-encoding ki wajah se digital artifacts detect huye.'
-      });
-    } else {
-      breakdown.push({
-        name: 'AI Generation Patterns',
-        status: 'clean',
-        icon: '✅',
-        detail: 'AI tools (Midjourney, DALL-E) ka koi pakka pattern nahi mila (' + realPercent + '% Asli/Authentic likelihood).'
-      });
-      breakdown.push({
-        name: 'Visual & Edge Details',
-        status: 'clean',
-        icon: '✅',
-        detail: 'Camera sensor ke natural grain aur edges natural paye gaye.'
-      });
-      if (scorePercent >= 30) {
-        breakdown.push({
-          name: 'Compression / WhatsApp Noise',
-          status: 'note',
-          icon: 'ℹ️',
-          detail: 'WhatsApp/JPEG compression se halka digital noise (' + scorePercent + '%) paya gaya, jo ki aam camera photos mein bilkul normal hai.'
-        });
-      }
-    }
-  } else {
-    // Audio
-    howItChecked = 'Wav2Vec2 Deepfake Audio Detection model se 16kHz mono audio ke 5-second chunks ka acoustic frequency scan kiya gaya.';
-    if (status === 'flagged') {
-      breakdown.push({
-        name: 'Synthetic Voice Patterns',
-        status: 'flagged',
-        icon: '🚨',
-        detail: 'Voice cloning ya AI speech synthesizer (TTS) ki frequencies detect hui (' + scorePercent + '% confidence).'
-      });
-      breakdown.push({
-        name: 'Vocal Breathing & Cadence',
-        status: 'flagged',
-        icon: '⚠️',
-        detail: 'Natural vocal pauses aur human breathing patterns abnormal lag rahe hain.'
-      });
-    } else if (status === 'unclear') {
-      breakdown.push({
-        name: 'Voice Analysis',
-        status: 'unclear',
-        icon: '⚠️',
-        detail: 'Audio mein halka sandehaspad signal mila (' + scorePercent + '%), jo digital compression ya noise cancelation ki wajah se ho sakta hai.'
-      });
-    } else {
-      breakdown.push({
-        name: 'Voice Authenticity',
-        status: 'clean',
-        icon: '✅',
-        detail: 'AI voice cloning ya synthetic audio ka koi signal nahi mila (' + realPercent + '% Asli awaaz likelihood).'
-      });
-      breakdown.push({
-        name: 'Acoustic Resonance',
-        status: 'clean',
-        icon: '✅',
-        detail: 'Human vocal cords aur room acoustics natural payi gayi.'
-      });
-    }
+    detail = isVisual
+      ? 'Models ke scores mixed hain ya signal repeat nahi hua.'
+      : 'Awaaz ka signal weak tha ya lagatar chunks mein repeat nahi hua.';
   }
 
   return {
     label,
     status,
-    score,
-    scorePercent,
-    realPercent,
-    time: peak.time,
-    howItChecked,
-    breakdown,
+    detail,
+    time: flagged ? samples[firstRepeated].time : undefined,
+    reviewTimes: samples.filter(sample => sample.scores.some(score => score >= highThreshold))
+      .map(sample => sample.time),
+    models: isVisual ? ['AI image model', 'Deepfake model'] : ['AI awaaz model'],
+    samples: samples.map((sample, index) => ({
+      ...sample,
+      signal: strong[index] ? 'strong' : sample.scores.every(score => score <= 0.2) ? 'low' : 'mixed',
+    })),
   };
 }
-
-async function classify(model, input, time) {
-  const scores = await model(input, { top_k: 2 });
-  const score = scores.find(item => item.label.toLowerCase() === 'fake')?.score;
-  if (!Number.isFinite(score)) throw new Error('Fake class missing from model response');
-  return { score, time };
-}
-
-async function visuals(path, type, folder) {
+async function visuals(path, type, folder, windows) {
   if (type === 'photo') {
-    return [await classifyVisual(path)];
+    const image = await RawImage.read(path);
+    const sample = await classifyVisual(image);
+    return [{ ...sample, monochromeGraphic: await looksLikeMonochromeGraphic(image) }];
   }
 
-  const frames = join(folder, 'frames');
-  await mkdir(frames);
-  await decode(['-t', String(duration), '-i', path, '-an', '-vf',
-    'fps=1/2:start_time=0:round=up,scale=384:384:force_original_aspect_ratio=decrease',
-    '-frames:v', '15', join(frames, '%02d.png')]);
-  const names = (await readdir(frames)).sort();
-  if (!names.length) return [];
   const samples = [];
-  for (const [index, name] of names.entries()) {
-    samples.push(await classifyVisual(join(frames, name), index * 2));
-  }
-  return samples;
-}
-
-async function speech(path) {
-  const { stdout } = await decode(['-i', path, '-t', String(duration), '-map', '0:a:0?',
-    '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1']);
-  const chunkSize = sampleRate * 5;
-  const samples = [];
-  for (let start = 0; start + sampleRate <= stdout.length / 4; start += chunkSize) {
-    const length = Math.min(chunkSize, stdout.length / 4 - start);
-    const input = Float32Array.from({ length }, (_, index) => stdout.readFloatLE((start + index) * 4));
-    if (input.every(value => Math.abs(value) < 0.0001)) continue;
-    samples.push(await classify(await loadAudio(), input, start / sampleRate));
-  }
-  return samples;
-}
-
-export async function scan(path, type, folder) {
-  const results = [];
-  async function check(label, runCheck) {
-    try {
-      results.push(summarize(label, await runCheck(), type));
-    } catch (error) {
-      console.error(label + ' check failed:', error.message);
-      results.push({ label, status: 'unavailable' });
+  for (const [window, { start, length }] of windows.entries()) {
+    const frames = join(folder, 'frames-' + window);
+    await mkdir(frames);
+    await decode(['-ss', String(start), '-i', path, '-t', String(length), '-an', '-vf',
+      'fps=1/2:start_time=0:round=up,scale=384:384:force_original_aspect_ratio=decrease',
+      '-frames:v', String(Math.ceil(length / 2)), join(frames, '%02d.png')]);
+    const names = (await readdir(frames)).sort();
+    for (const [index, name] of names.entries()) {
+      const sample = await classifyVisual(join(frames, name), start + index * 2);
+      samples.push({ ...sample, window });
     }
   }
-  if (type !== 'audio') await check('AI visuals', () => visuals(path, type, folder));
-  if (type !== 'photo') await check('AI awaaz', () => speech(path));
+  return samples;
+}
+
+async function speech(path, windows) {
+  const chunkSize = sampleRate * 5;
+  const samples = [];
+  for (const [window, { start, length }] of windows.entries()) {
+    const { stdout } = await decode(['-ss', String(start), '-i', path, '-t', String(length), '-map', '0:a:0?',
+      '-vn', '-ac', '1', '-ar', String(sampleRate), '-f', 'f32le', 'pipe:1']);
+    for (let offset = 0; offset + sampleRate <= stdout.length / 4; offset += chunkSize) {
+      const length = Math.min(chunkSize, stdout.length / 4 - offset);
+      const input = Float32Array.from({ length }, (_, index) => stdout.readFloatLE((offset + index) * 4));
+      if (input.every(value => Math.abs(value) < 0.0001)) continue;
+      const model = await loadAudio();
+      const classes = await model(input, { top_k: 2 });
+      samples.push({ scores: [readScore(classes, 'fake')], time: start + offset / sampleRate, window });
+    }
+  }
+  return samples;
+}
+export async function scan(path, type, folder) {
+  const results = [];
+  const windows = type === 'photo' ? [] : await samplingPlan(path);
+  async function check(label, runCheck, isVisual = false) {
+    try {
+      const result = summarize(label, await runCheck(), type, isVisual);
+      results.push({ ...result, ...(windows.length && { windows, sampleKind: isVisual ? 'frame' : 'audio chunk' }) });
+    } catch (error) {
+      console.error(label + ' check failed:', error.message);
+      results.push({ label, status: 'unavailable', detail: 'File ya model process nahi ho saka.' });
+    }
+  }
+  if (type !== 'audio') await check('AI visuals', () => visuals(path, type, folder, windows), true);
+  if (type !== 'photo') await check('AI awaaz', () => speech(path, windows));
   return results;
 }

@@ -21,19 +21,15 @@
   .result-card.flagged { border-color: #fca5a5; background: #fef2f2; }
   .result-card.low { border-color: #86efac; background: #f0fdf4; }
   .result-card.unclear { border-color: #fde047; background: #fefce8; }
-  .result-header { display: flex; justify-content: space-between; align-items: center; font-weight: 650; }
+  .result-header { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-weight: 650; }
   .result-card.flagged .result-header { color: #991b1b; }
   .result-card.low .result-header { color: #166534; }
   .result-card.unclear .result-header { color: #854d0e; }
-  .meter-bar { height: 8px; width: 100%; background: #e2e8f0; border-radius: 4px; overflow: hidden; margin: 8px 0; display: flex; }
-  .meter-fill-ai { background: #ef4444; height: 100%; }
-  .meter-fill-real { background: #22c55e; height: 100%; }
-  .result-meta { font-size: 0.88rem; color: #4b5563; display: flex; justify-content: space-between; }
-  .breakdown-box { margin-top: 12px; padding-top: 10px; border-top: 1px dashed rgba(0,0,0,0.15); }
-  .breakdown-title { font-size: 0.88rem; font-weight: 650; margin-bottom: 6px; color: #1f2937; }
-  .breakdown-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
-  .breakdown-item { font-size: 0.84rem; display: flex; align-items: flex-start; gap: 6px; line-height: 1.4; color: #374151; }
-  .how-box { margin-top: 10px; font-size: 0.8rem; color: #4b5563; background: rgba(0,0,0,0.03); padding: 8px 10px; border-radius: 6px; }
+  .score-badge { border: 1px solid currentColor; border-radius: 999px; padding: 2px 9px; font-size: .85rem;  }
+  .scan-details { margin-top: 8px; font-size: .85rem; }
+  .scan-details summary { cursor: pointer; font-weight: 600; }
+  .scan-details ul { padding-left: 20px; margin: 6px 0; }
+  .scan-details li + li { margin-top: 5px; }
   #setup { padding-top: 14px; border-top: 1px solid #d6e0d8; }
 </style>
 <main>
@@ -48,7 +44,7 @@
     </form>
     <div id="result" role="status" aria-live="polite"></div>
     <p class="hint">Audio check boli hui awaaz ke liye hai. Chhote edits aur compressed clips mein AI ka signal miss ho sakta hai.</p>
-    <p id="setup" class="hint">Video aur audio ke pehle 30 seconds check hote hain. Pehli baar model download hone mein waqt lag sakta hai.</p>
+    <p id="setup" class="hint">Long video aur audio mein shuru, beech aur end se samples check hote hain. Pehli baar model download hone mein waqt lag sakta hai.</p>
   </article>
 </main>
 <script>
@@ -58,11 +54,37 @@
   const result = document.querySelector('#result');
 
   const labels = {
-    flagged: 'AI Generated (Pakka signal mila)',
-    low: 'Asli / Real (AI ka signal nahi mila)',
-    unclear: 'Sandehaspad (Halka signal)',
+    flagged: 'Strong AI signal mila',
+    low: 'AI ka signal nahi mila',
+    unclear: 'Scan hua, result unclear',
     unavailable: 'Check nahi ho saka',
   };
+
+  function renderSamples(check) {
+    const details = document.createElement('details');
+    details.className = 'scan-details';
+    details.open = check.samples.length === 1;
+    const summary = document.createElement('summary');
+    const strongCount = check.samples.filter(sample => sample.signal === 'strong').length;
+    summary.textContent = check.samples.length + ' check hue · ' + strongCount + ' strong signal';
+    details.append(summary);
+
+    const list = document.createElement('ul');
+    const signals = { strong: 'Strong', low: 'Kam', mixed: 'Unclear' };
+    for (const sample of check.samples) {
+      const row = document.createElement('li');
+      const position = Number.isFinite(sample.time) ? sample.time.toFixed(1) + 's · ' : '';
+      const scores = sample.scores.map((score, index) => check.models[index] + ' ' + (score * 100).toFixed(1) + '%');
+      row.textContent = position + signals[sample.signal] + ' · ' + scores.join(' · ');
+      list.append(row);
+    }
+
+    const note = document.createElement('div');
+    note.className = 'hint';
+    note.textContent = 'Score model ka signal hai. Photo ya clip kitni asli hai, uska percentage is score se tay nahi hota.';
+    details.append(list, note);
+    return details;
+  }
 
   form.addEventListener('submit', async event => {
     event.preventDefault();
@@ -90,87 +112,50 @@
         const header = document.createElement('div');
         header.className = 'result-header';
         const title = document.createElement('span');
-        const badge = check.status === 'flagged' ? '⚠️ ' : (check.status === 'low' ? '✅ ' : 'ℹ️ ');
+        const badge = check.status === 'flagged' ? '⚠️ ' : 'ℹ️ ';
         title.textContent = badge + check.label + ' — ' + (labels[check.status] || check.status);
         header.append(title);
+        if (check.samples?.length) {
+          const score = document.createElement('span');
+          score.className = 'score-badge';
+          const peak = check.samples.reduce((best, sample) => sample.scores[0] > best.scores[0] ? sample : best);
+          score.textContent = check.models[0] + ' · ' + (peak.scores[0] * 100).toFixed(1) + '%';
+          if (check.sampleKind) {
+            score.textContent += ' · highest ' + check.sampleKind + ' at ' + peak.time.toFixed(1) + 's';
+          }
+          header.append(score);
+        }
         card.append(header);
 
-        if (Number.isFinite(check.scorePercent)) {
-          const bar = document.createElement('div');
-          bar.className = 'meter-bar';
-          const fillAi = document.createElement('div');
-          fillAi.className = 'meter-fill-ai';
-          fillAi.style.width = check.scorePercent + '%';
-          const fillReal = document.createElement('div');
-          fillReal.className = 'meter-fill-real';
-          fillReal.style.width = check.realPercent + '%';
-          bar.append(fillAi, fillReal);
-          card.append(bar);
-
-          const meta = document.createElement('div');
-          meta.className = 'result-meta';
-          const aiText = document.createElement('span');
-          aiText.textContent = 'AI Signal: ' + check.scorePercent + '%';
-          const realText = document.createElement('span');
-          realText.textContent = 'Asli / Real: ' + check.realPercent + '%';
-          meta.append(aiText, realText);
-          card.append(meta);
-
-          const explanation = document.createElement('div');
-          explanation.className = 'hint';
-          explanation.style.marginTop = '8px';
-          if (check.status === 'low') {
-            explanation.textContent = 'Asli photo lag rahi hai. AI ka koi confident ya thos signal nahi mila.';
-            explanation.style.color = '#166534';
-          } else if (check.status === 'flagged') {
-            explanation.textContent = 'Is file mein AI generated hone ka strong signal mila hai.';
-            explanation.style.color = '#991b1b';
-          } else if (check.status === 'unclear') {
-            explanation.textContent = 'Result mixed hai. WhatsApp compression ya filter ki wajah se thoda noise AI jaisa lag sakta hai.';
-            explanation.style.color = '#854d0e';
-          }
-          card.append(explanation);
-
-          if (Array.isArray(check.breakdown) && check.breakdown.length) {
-            const bBox = document.createElement('div');
-            bBox.className = 'breakdown-box';
-            const bTitle = document.createElement('div');
-            bTitle.className = 'breakdown-title';
-            bTitle.textContent = '🔍 Kya mila aur kya check hua:';
-            bBox.append(bTitle);
-
-            const bList = document.createElement('ul');
-            bList.className = 'breakdown-list';
-            for (const item of check.breakdown) {
-              const li = document.createElement('li');
-              li.className = 'breakdown-item';
-              const icon = document.createElement('span');
-              icon.textContent = item.icon || '•';
-              const body = document.createElement('div');
-              body.innerHTML = '<strong>' + item.name + ':</strong> ' + item.detail;
-              li.append(icon, body);
-              bList.append(li);
-            }
-            bBox.append(bList);
-            card.append(bBox);
-          }
-
-          if (check.howItChecked) {
-            const how = document.createElement('div');
-            how.className = 'how-box';
-            how.innerHTML = '<strong>⚙️ Kaise check hua:</strong> ' + check.howItChecked;
-            card.append(how);
-          }
+        if (check.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'hint';
+          detail.textContent = check.detail;
+          card.append(detail);
         }
-
         if (Number.isFinite(check.time) && !file.type.startsWith('image/')) {
           const timeInfo = document.createElement('div');
           timeInfo.className = 'hint';
           timeInfo.style.marginTop = '6px';
-          timeInfo.textContent = check.time.toFixed(1) + 's par highest AI score detect hua.';
+          timeInfo.textContent = check.time.toFixed(1) + 's se strong signal mila.';
           card.append(timeInfo);
         }
 
+        if (check.status === 'unclear' && check.reviewTimes?.length) {
+          const review = document.createElement('div');
+          review.className = 'hint';
+          review.textContent = 'High model score. Review karo ' + check.reviewTimes.map(time => time.toFixed(1) + 's').join(', ');
+          card.append(review);
+        }
+        if (check.samples?.length && check.windows?.length) {
+          const coverage = document.createElement('div');
+          coverage.className = 'hint';
+          coverage.textContent = 'Sample ranges · ' + check.windows.map(({ start, length }) =>
+            start.toFixed(1) + '–' + (start + length).toFixed(1) + 's'
+          ).join(', ');
+          card.append(coverage);
+        }
+        if (check.samples?.length) card.append(renderSamples(check));
         result.append(card);
       }
     } catch (error) {
