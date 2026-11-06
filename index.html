@@ -26,12 +26,12 @@
     <form id="scan">
       <label for="media">File select karo</label>
       <input id="media" type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.mov,.webm,.avi,.mkv,.wmv,.mp3,.wav,.m4a,.flac,.ogg" required>
-      <span class="hint">Max 20 MB. Scan ke liye file Hive ko bheji jaati hai.</span>
-      <button id="submit" disabled>AI check karo</button>
+      <span class="hint">Max 20 MB. File isi computer par scan hoti hai.</span>
+      <button id="submit">AI check karo</button>
     </form>
     <div id="result" role="status" aria-live="polite"></div>
-    <p class="hint">Chhote edits aur compressed clips mein AI ka signal miss ho sakta hai.</p>
-    <p id="setup" class="hint">API setup check ho raha hai…</p>
+    <p class="hint">Audio check boli hui awaaz ke liye hai. Chhote edits aur compressed clips mein AI ka signal miss ho sakta hai.</p>
+    <p id="setup" class="hint">Video aur audio ke pehle 30 seconds check hote hain. Pehli baar model download hone mein waqt lag sakta hai.</p>
   </article>
 </main>
 <script>
@@ -39,26 +39,13 @@
   const media = document.querySelector('#media');
   const button = document.querySelector('#submit');
   const result = document.querySelector('#result');
-  const setup = document.querySelector('#setup');
+
   const labels = {
     flagged: 'AI ka signal mila',
     low: 'AI ka signal nahi mila',
     unclear: 'Result unclear',
     unavailable: 'Check nahi ho saka',
   };
-
-  fetch('/api/setup').then(response => response.json()).then(({ visual, audio }) => {
-    button.disabled = !visual && !audio;
-    if (visual && audio) {
-      setup.hidden = true;
-      return;
-    }
-    setup.textContent = visual || audio ? 'Ek Hive API key abhi missing hai. ' : 'App mein scan ke liye Hive API keys setup karo. ';
-    const link = document.createElement('a');
-    link.href = 'https://hivedetect.ai/';
-    link.textContent = 'Hive par free scan kholo';
-    setup.append(link);
-  }).catch(() => { setup.textContent = 'App server se connection nahi ho saka.'; });
 
   form.addEventListener('submit', async event => {
     event.preventDefault();

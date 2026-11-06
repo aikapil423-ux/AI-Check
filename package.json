@@ -1,0 +1,28 @@
+{
+  "name": "ai-check",
+  "version": "1.0.0",
+  "description": "Local AI media detector for photo, video, and audio",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aikapil423-ux/AI-Check.git"
+  },
+  "keywords": [
+    "ai-detection",
+    "deepfake",
+    "transformers",
+    "onnx"
+  ],
+  "author": "",
+  "bugs": {
+    "url": "https://github.com/aikapil423-ux/AI-Check/issues"
+  },
+  "homepage": "https://github.com/aikapil423-ux/AI-Check#readme",
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "1.1.0",
+    "@huggingface/transformers": "4.3.2"
+  },
+  "private": true
+}
