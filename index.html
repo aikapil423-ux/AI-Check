@@ -16,7 +16,24 @@
   button { background: #185639; color: white; border: 0; padding: 12px; border-radius: 8px; font: inherit; font-weight: 650; cursor: pointer; }
   button:disabled { background: #52645a; cursor: default; }
   a { color: #185639; }
-  #result p { padding: 10px; background: #eef5ef; border-radius: 8px; }
+  #result { margin-top: 18px; display: grid; gap: 12px; }
+  .result-card { padding: 14px 16px; border-radius: 12px; border: 1px solid #d6e0d8; background: #f9fbf9; }
+  .result-card.flagged { border-color: #fca5a5; background: #fef2f2; }
+  .result-card.low { border-color: #86efac; background: #f0fdf4; }
+  .result-card.unclear { border-color: #fde047; background: #fefce8; }
+  .result-header { display: flex; justify-content: space-between; align-items: center; font-weight: 650; }
+  .result-card.flagged .result-header { color: #991b1b; }
+  .result-card.low .result-header { color: #166534; }
+  .result-card.unclear .result-header { color: #854d0e; }
+  .meter-bar { height: 8px; width: 100%; background: #e2e8f0; border-radius: 4px; overflow: hidden; margin: 8px 0; display: flex; }
+  .meter-fill-ai { background: #ef4444; height: 100%; }
+  .meter-fill-real { background: #22c55e; height: 100%; }
+  .result-meta { font-size: 0.88rem; color: #4b5563; display: flex; justify-content: space-between; }
+  .breakdown-box { margin-top: 12px; padding-top: 10px; border-top: 1px dashed rgba(0,0,0,0.15); }
+  .breakdown-title { font-size: 0.88rem; font-weight: 650; margin-bottom: 6px; color: #1f2937; }
+  .breakdown-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+  .breakdown-item { font-size: 0.84rem; display: flex; align-items: flex-start; gap: 6px; line-height: 1.4; color: #374151; }
+  .how-box { margin-top: 10px; font-size: 0.8rem; color: #4b5563; background: rgba(0,0,0,0.03); padding: 8px 10px; border-radius: 6px; }
   #setup { padding-top: 14px; border-top: 1px solid #d6e0d8; }
 </style>
 <main>
@@ -41,9 +58,9 @@
   const result = document.querySelector('#result');
 
   const labels = {
-    flagged: 'AI ka signal mila',
-    low: 'AI ka signal nahi mila',
-    unclear: 'Result unclear',
+    flagged: 'AI Generated (Pakka signal mila)',
+    low: 'Asli / Real (AI ka signal nahi mila)',
+    unclear: 'Sandehaspad (Halka signal)',
     unavailable: 'Check nahi ho saka',
   };
 
@@ -67,11 +84,94 @@
       if (!response.ok) throw new Error(data.error);
       result.replaceChildren();
       for (const check of data.checks) {
-        const row = document.createElement('p');
-        const time = Number.isFinite(check.time) && !file.type.startsWith('image/')
-          ? ' · ' + check.time.toFixed(1) + 's par highest score' : '';
-        row.textContent = check.label + ' — ' + labels[check.status] + time;
-        result.append(row);
+        const card = document.createElement('div');
+        card.className = 'result-card ' + check.status;
+
+        const header = document.createElement('div');
+        header.className = 'result-header';
+        const title = document.createElement('span');
+        const badge = check.status === 'flagged' ? '⚠️ ' : (check.status === 'low' ? '✅ ' : 'ℹ️ ');
+        title.textContent = badge + check.label + ' — ' + (labels[check.status] || check.status);
+        header.append(title);
+        card.append(header);
+
+        if (Number.isFinite(check.scorePercent)) {
+          const bar = document.createElement('div');
+          bar.className = 'meter-bar';
+          const fillAi = document.createElement('div');
+          fillAi.className = 'meter-fill-ai';
+          fillAi.style.width = check.scorePercent + '%';
+          const fillReal = document.createElement('div');
+          fillReal.className = 'meter-fill-real';
+          fillReal.style.width = check.realPercent + '%';
+          bar.append(fillAi, fillReal);
+          card.append(bar);
+
+          const meta = document.createElement('div');
+          meta.className = 'result-meta';
+          const aiText = document.createElement('span');
+          aiText.textContent = 'AI Signal: ' + check.scorePercent + '%';
+          const realText = document.createElement('span');
+          realText.textContent = 'Asli / Real: ' + check.realPercent + '%';
+          meta.append(aiText, realText);
+          card.append(meta);
+
+          const explanation = document.createElement('div');
+          explanation.className = 'hint';
+          explanation.style.marginTop = '8px';
+          if (check.status === 'low') {
+            explanation.textContent = 'Asli photo lag rahi hai. AI ka koi confident ya thos signal nahi mila.';
+            explanation.style.color = '#166534';
+          } else if (check.status === 'flagged') {
+            explanation.textContent = 'Is file mein AI generated hone ka strong signal mila hai.';
+            explanation.style.color = '#991b1b';
+          } else if (check.status === 'unclear') {
+            explanation.textContent = 'Result mixed hai. WhatsApp compression ya filter ki wajah se thoda noise AI jaisa lag sakta hai.';
+            explanation.style.color = '#854d0e';
+          }
+          card.append(explanation);
+
+          if (Array.isArray(check.breakdown) && check.breakdown.length) {
+            const bBox = document.createElement('div');
+            bBox.className = 'breakdown-box';
+            const bTitle = document.createElement('div');
+            bTitle.className = 'breakdown-title';
+            bTitle.textContent = '🔍 Kya mila aur kya check hua:';
+            bBox.append(bTitle);
+
+            const bList = document.createElement('ul');
+            bList.className = 'breakdown-list';
+            for (const item of check.breakdown) {
+              const li = document.createElement('li');
+              li.className = 'breakdown-item';
+              const icon = document.createElement('span');
+              icon.textContent = item.icon || '•';
+              const body = document.createElement('div');
+              body.innerHTML = '<strong>' + item.name + ':</strong> ' + item.detail;
+              li.append(icon, body);
+              bList.append(li);
+            }
+            bBox.append(bList);
+            card.append(bBox);
+          }
+
+          if (check.howItChecked) {
+            const how = document.createElement('div');
+            how.className = 'how-box';
+            how.innerHTML = '<strong>⚙️ Kaise check hua:</strong> ' + check.howItChecked;
+            card.append(how);
+          }
+        }
+
+        if (Number.isFinite(check.time) && !file.type.startsWith('image/')) {
+          const timeInfo = document.createElement('div');
+          timeInfo.className = 'hint';
+          timeInfo.style.marginTop = '6px';
+          timeInfo.textContent = check.time.toFixed(1) + 's par highest AI score detect hua.';
+          card.append(timeInfo);
+        }
+
+        result.append(card);
       }
     } catch (error) {
       result.textContent = error.message;
