@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="hi-Latn">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Check</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #f0f4f0; color: #16241c; font: 16px/1.55 system-ui, sans-serif; }
+  main { max-width: 650px; margin: clamp(24px, 10vh, 100px) auto; padding: 0 18px; }
+  article { background: white; padding: clamp(22px, 5vw, 44px); border: 1px solid #d6e0d8; border-radius: 22px; }
+  h1 { font-size: clamp(32px, 7vw, 48px); letter-spacing: -.05em; margin: 0; }
+  p { margin: 0 0 14px; }
+  .hint { color: #46564d; font-size: .9rem; }
+  form { display: grid; gap: 12px; margin: 24px 0 18px; }
+  input { width: 100%; padding: 14px; border: 1px dashed #718b78; border-radius: 10px; background: #f5f8f5; }
+  button { background: #185639; color: white; border: 0; padding: 12px; border-radius: 8px; font: inherit; font-weight: 650; cursor: pointer; }
+  button:disabled { background: #52645a; cursor: default; }
+  a { color: #185639; }
+  #result p { padding: 10px; background: #eef5ef; border-radius: 8px; }
+  #setup { padding-top: 14px; border-top: 1px solid #d6e0d8; }
+</style>
+<main>
+  <article>
+    <h1>AI Check</h1>
+    <p>Photo, video ya audio mein AI ka signal check karo.</p>
+    <form id="scan">
+      <label for="media">File select karo</label>
+      <input id="media" type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.mov,.webm,.avi,.mkv,.wmv,.mp3,.wav,.m4a,.flac,.ogg" required>
+      <span class="hint">Max 20 MB. Scan ke liye file Hive ko bheji jaati hai.</span>
+      <button id="submit" disabled>AI check karo</button>
+    </form>
+    <div id="result" role="status" aria-live="polite"></div>
+    <p class="hint">Chhote edits aur compressed clips mein AI ka signal miss ho sakta hai.</p>
+    <p id="setup" class="hint">API setup check ho raha hai…</p>
+  </article>
+</main>
+<script>
+  const form = document.querySelector('#scan');
+  const media = document.querySelector('#media');
+  const button = document.querySelector('#submit');
+  const result = document.querySelector('#result');
+  const setup = document.querySelector('#setup');
+  const labels = {
+    flagged: 'AI ka signal mila',
+    low: 'AI ka signal nahi mila',
+    unclear: 'Result unclear',
+    unavailable: 'Check nahi ho saka',
+  };
+
+  fetch('/api/setup').then(response => response.json()).then(({ visual, audio }) => {
+    button.disabled = !visual && !audio;
+    if (visual && audio) {
+      setup.hidden = true;
+      return;
+    }
+    setup.textContent = visual || audio ? 'Ek Hive API key abhi missing hai. ' : 'App mein scan ke liye Hive API keys setup karo. ';
+    const link = document.createElement('a');
+    link.href = 'https://hivedetect.ai/';
+    link.textContent = 'Hive par free scan kholo';
+    setup.append(link);
+  }).catch(() => { setup.textContent = 'App server se connection nahi ho saka.'; });
+
+  form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const file = media.files[0];
+    if (!file || file.size > 20 * 1024 * 1024) {
+      result.textContent = '20 MB tak ki file select karo.';
+      return;
+    }
+    button.disabled = true;
+    media.disabled = true;
+    result.textContent = 'File check ho rahi hai…';
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'X-File-Name': encodeURIComponent(file.name), 'Content-Type': file.type || 'application/octet-stream' },
+        body: file,
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      result.replaceChildren();
+      for (const check of data.checks) {
+        const row = document.createElement('p');
+        const time = Number.isFinite(check.time) && !file.type.startsWith('image/')
+          ? ' · ' + check.time.toFixed(1) + 's par highest score' : '';
+        row.textContent = check.label + ' — ' + labels[check.status] + time;
+        result.append(row);
+      }
+    } catch (error) {
+      result.textContent = error.message;
+    } finally {
+      button.disabled = false;
+      media.disabled = false;
+    }
+  });
+</script>
+</html>
